@@ -65,6 +65,8 @@ Generate excel sheet? [y/N]:
 
 Press Enter to skip. `y` or `yes` writes `checkdepend-fixes-<date>.xlsx` or `checkdepend-backport-<date>.xlsx` in the current directory. This needs `openpyxl`.
 
+Each input commit is one block. When that commit has several dependencies, each dependency is its own row and the commit cells are merged across those rows, so the dependencies stay under the commit they belong to.
+
 ## Install
 `--install` compiles a binary with `gcc` and installs it as `checkdepend`. It uses `/usr/local/bin` when that directory is writable, and `~/.local/bin` otherwise.
 

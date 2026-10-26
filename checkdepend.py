@@ -330,7 +330,7 @@ def run_fixes():
 
 # ---------- backport (original check) ----------
 def run_backport():
-    """Original dependency check. Returns one excel row per result line."""
+    """Original dependency check. Returns one record per dependency line."""
     user_repo = prompt_line("\033[1mEnter path to your kernel source:\033[0m ")
     if user_repo is None:
         return []
@@ -475,47 +475,159 @@ def excel_text(value) -> str:
         return "'" + text
     return text
 
+def group_by_commit(rows):
+    """Keep each commit's dependencies together, in the order they were found."""
+    groups = []
+    for row in rows:
+        if groups and groups[-1][0].get("commit") == row.get("commit"):
+            groups[-1].append(row)
+        else:
+            groups.append([row])
+    return groups
+
+def estimate_lines(text, width) -> int:
+    text = "" if text is None else str(text)
+    if not text:
+        return 1
+    chars = max(int(width), 8)
+    lines = 0
+    for part in text.splitlines():
+        lines += max(1, (len(part) + chars - 1) // chars)
+    return max(lines, 1)
+
 def write_excel(rows, mode: str) -> str:
+    """Write one block per commit, with each dependency on its own row.
+
+    A commit that has several dependencies spans those rows. The commit,
+    subject, and result cells are merged across the block so the
+    dependencies stay underneath that commit instead of looking like
+    separate commits.
+    """
     import openpyxl
-    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
     from openpyxl.utils import get_column_letter
 
     if mode == "fixes":
         headers = ["Commit", "Subject", "Fixes commit", "Fixes subject"]
-        keys = ["commit", "subject", "fixes", "fixes_subject"]
+        shared_keys = ["commit", "subject"]
+        item_keys = ["fixes", "fixes_subject"]
         title = "Fixes"
         widths = [42, 78, 42, 78]
+        hash_columns = {1, 3}
     else:
         headers = ["Commit", "Subject", "Result", "Dependency",
                    "Dependency subject", "State"]
-        keys = ["commit", "subject", "result", "dependency",
-                "dependency_subject", "state"]
+        shared_keys = ["commit", "subject", "result"]
+        item_keys = ["dependency", "dependency_subject", "state"]
         title = "Backport"
         widths = [42, 78, 14, 42, 78, 16]
+        hash_columns = {1, 4}
+
+    thin = Side(style="thin", color="D0D7DE")
+    thick = Side(style="medium", color="1F4E79")
+    header_font = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
+    header_fill = PatternFill("solid", fgColor="1F4E79")
+    body_font = Font(name="Calibri", size=11)
+    hash_font = Font(name="Consolas", size=10)
+    group_fills = (
+        PatternFill("solid", fgColor="FFFFFF"),
+        PatternFill("solid", fgColor="F4F7FB"),
+    )
+    pass_fill = PatternFill("solid", fgColor="D9EFD9")
+    fail_fill = PatternFill("solid", fgColor="F8D0D0")
+    pass_font = Font(bold=True, color="1B7A32", name="Calibri", size=11)
+    fail_font = Font(bold=True, color="9C1B1B", name="Calibri", size=11)
+    fixed_font = Font(bold=True, color="1B7A32", name="Calibri", size=11)
+    needed_font = Font(bold=True, color="9C1B1B", name="Calibri", size=11)
+    align = Alignment(vertical="center", wrap_text=True)
 
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = title
-    header_font = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
-    header_fill = PatternFill("solid", fgColor="1F4E79")
-    body_font = Font(name="Calibri", size=11)
-    align = Alignment(vertical="center")
     for col, header in enumerate(headers, 1):
         cell = ws.cell(1, col, header)
         cell.font = header_font
         cell.fill = header_fill
-        cell.alignment = align
-    for row_index, row in enumerate(rows, 2):
-        for col, key in enumerate(keys, 1):
-            cell = ws.cell(row_index, col, excel_text(row.get(key, "")))
-            cell.font = body_font
+        cell.alignment = Alignment(vertical="center", horizontal="center")
+        cell.border = Border(left=thin, right=thin, top=thin, bottom=thick)
+    ws.row_dimensions[1].height = 22
+    ws.freeze_panes = "A2"
+
+    excel_row = 2
+    for group_index, group in enumerate(group_by_commit(rows)):
+        start = excel_row
+        fill = group_fills[group_index % 2]
+        first = group[0]
+        heights = []
+        for offset, item in enumerate(group):
+            row_number = start + offset
+            is_last = offset == len(group) - 1
+            border = Border(
+                left=thin, right=thin, top=thin,
+                bottom=thick if is_last else thin,
+            )
+            for col, key in enumerate(item_keys, len(shared_keys) + 1):
+                value = excel_text(item.get(key, ""))
+                cell = ws.cell(row_number, col, value)
+                cell.alignment = align
+                cell.border = border
+                cell.fill = fill
+                cell.font = hash_font if col in hash_columns else body_font
+                if key == "state" and value == "Fixed":
+                    cell.font = fixed_font
+                elif key == "state" and value == "needed":
+                    cell.font = needed_font
+            item_lines = 1
+            for key, width in zip(item_keys, widths[len(shared_keys):]):
+                item_lines = max(item_lines, estimate_lines(item.get(key, ""), width))
+            heights.append(max(18, 16 * item_lines + 4))
+            excel_row += 1
+        end = excel_row - 1
+
+        shared_lines = 1
+        for key, width in zip(shared_keys, widths):
+            shared_lines = max(shared_lines, estimate_lines(first.get(key, ""), width))
+        shared_needed = 16 * shared_lines + 4
+        if sum(heights) < shared_needed:
+            heights[-1] += shared_needed - sum(heights)
+
+        for offset, height in enumerate(heights):
+            ws.row_dimensions[start + offset].height = height
+
+        for col, key in enumerate(shared_keys, 1):
+            value = excel_text(first.get(key, ""))
+            cell = ws.cell(start, col, value)
             cell.alignment = align
+            cell.border = Border(
+                left=thin, right=thin, top=thin,
+                bottom=thick if start == end else thin,
+            )
+            shared_fill = fill
+            cell.fill = shared_fill
+            cell.font = hash_font if col in hash_columns else body_font
+            if key == "result" and value == "PASS":
+                cell.font = pass_font
+                shared_fill = pass_fill
+                cell.fill = shared_fill
+            elif key == "result" and value == "FAIL":
+                cell.font = fail_font
+                shared_fill = fail_fill
+                cell.fill = shared_fill
+            if end > start:
+                ws.merge_cells(
+                    start_row=start, start_column=col,
+                    end_row=end, end_column=col,
+                )
+                for row_number in range(start + 1, end + 1):
+                    covered = ws.cell(row_number, col)
+                    covered.border = Border(
+                        left=thin, right=thin, top=thin,
+                        bottom=thick if row_number == end else thin,
+                    )
+                    covered.fill = shared_fill
+
     for col, width in enumerate(widths, 1):
         ws.column_dimensions[get_column_letter(col)].width = width
-    last = max(1, len(rows) + 1)
-    ws.auto_filter.ref = f"A1:{get_column_letter(len(headers))}{last}"
-    ws.freeze_panes = "A2"
-    ws.row_dimensions[1].height = 22
 
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
     path = os.path.abspath(f"checkdepend-{mode}-{stamp}.xlsx")
